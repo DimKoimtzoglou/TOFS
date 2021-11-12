@@ -1,0 +1,1 @@
+Local material of the stories 
