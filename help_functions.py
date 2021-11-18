@@ -1,13 +1,14 @@
-import copy
 import logging
+from datetime import timedelta
+import logging
+import multiprocessing
 from datetime import timedelta
 
 import numpy as np
 import pandas as pd
-from sklearn.base import clone
-from sklearn.linear_model import ElasticNetCV
-
-np.random.seed(0)
+import gc
+num_cores = multiprocessing.cpu_count()
+np.random.seed(123)
 NUMBER_LAGS = 7
 import settings as s
 # # If you want to
@@ -15,6 +16,10 @@ import settings as s
 import glmnet_python
 from cvglmnet import cvglmnet
 from cvglmnetPredict import cvglmnetPredict
+import sys
+import warnings
+if not sys.warnoptions:
+    warnings.simplefilter("ignore")
 
 def estimate_model(X, y):
     """
@@ -40,7 +45,7 @@ def estimate_model(X, y):
         # Last observations have higher weight
         weights = [1.0] * (X.shape[0] - 3) + [2.0] * 3
         # Elastic Net model
-       # elasticNet_model = clone(ElasticNetCV(**s.ELASTIC_NET_SETTINGS_30))
+        # elasticNet_model = clone(ElasticNetCV(**s.ELASTIC_NET_SETTINGS_30))
         # elasticNet_model = clone(ElasticNetCV(cv=3 ,random_state=42))
         # TODO: Current version of Elastic Net does not support weights --> Need to upgrade
         # elasticNet_cv = elasticNet_model.fit(X, y, sample_weight=weights)
@@ -51,11 +56,13 @@ def estimate_model(X, y):
                             'lag_3', 'lag_4', 'lag_5', 'lag_6', 'lag_7', 'step_last_21',
                             'step_last_15']
             X = X[ORDER_COLUMNS]
+            np.random.seed(123)
             cv_ = cvglmnet(x=X.to_numpy().copy(),
                            y=y.values.astype(float),
                            penalty_factor=penalties_,
-                           alpha=0.5,
-                           intr = True,
+                          # lambdau  = np.array([539, 540.258]),
+                           alpha=0.8,
+                           intr=True,
                            weights=np.array(weights).astype(float),
                            cl=limits,
                            nfolds=3,
@@ -66,12 +73,6 @@ def estimate_model(X, y):
         except ValueError as e:
             logging.warning('Error in CV')
             cv_= None
-            # settings = copy.copy(s.ELASTIC_NET_SETTINGS_30)
-            # settings['cv'] = 2
-            # elasticNet_model = clone(ElasticNetCV(**settings))
-            # # elasticNet_model = clone(ElasticNetCV(cv=2, random_state=42))
-            # # with joblib.parallel_backend('dask'):
-            # cv_ = elasticNet_model.fit(X, y)
     return cv_
 
 
@@ -93,6 +94,7 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
         train_data = train_data[ORDER_COLUMNS]
         #all_data = all_data[ORDER_COLUMNS]
         fitting = cvglmnetPredict(cv_model, newx=train_data.to_numpy().copy())
+#        fitting = glmnetPredict(cv_model, newx=train_data.to_numpy().copy())
         all_data['fitted'] = fitting
         all_data = all_data.reset_index(drop=True)
         train_data = train_data.reset_index(drop=True)
@@ -123,7 +125,7 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
             stdcomponent = 0
             w1 = 0.5
             w2 = 0.5
-        mu, sigma = multiplier * np.mean(x_hat) * multiplier, stdcomponent
+        mu, sigma = multiplier * np.mean(x_hat), stdcomponent
         v = np.random.normal(mu, sigma, predictions_ahead)
         # Get the last training values
         last_train_values = train_data.tail(1)
@@ -163,6 +165,8 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
         for idx, day in enumerate(prediction_dates):
             # elasticnet_prediction = cv_model.predict(df_prediction)
             elasticnet_prediction = cvglmnetPredict(cv_model, newx=df_prediction.to_numpy().copy())
+            #elasticnet_prediction = glmnetPredict(cv_model, newx=df_prediction.to_numpy().copy())
+
             #print(elasticnet_prediction)
             prediction = w2 * np.max([elasticnet_prediction[0] + v[idx], 0.0]) + df_prediction['lag_1'] * w1
             predictions.append(prediction.values[0])
@@ -180,6 +184,36 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
         x_hat = all_data['x_hat'].iloc[iniLastObs - 1:]
         mu, sigma = np.mean(x_hat), np.std(x_hat)
         v = np.random.normal(mu, sigma, predictions_ahead)
+        # For the key 824863 NL if you change v with those values then the result is the same WITH JULIA
+        # v= np.array([-46.02754763498439,
+        #     -14.470340754022867,
+        #     -312.0933055056326,
+        #     -175.6291803742907,
+        #     -210.65555921132753,
+        #     -35.79823464572249,
+        #      53.986721301803215])
+        # For the key 865474 BE if you change v with those values then the result is the same WITH JULIA
+        # v = np.array([  0.8156827734679348,
+        #      -15.738750989554019,
+        #      -16.167517101298586,
+        #      -15.803117749837238,
+        #      -14.067289935181188,
+        #      -10.772371540727697,
+        #      -13.978731197648052])
+        # 694030/NL
+        # v = np.array(  [15.728082212079617,
+        #                  -5.562543056146005,
+        #                 -74.21757274192805,
+        #                 10.427201677739003,
+        #                 -26.627725987479153,
+        #                 -36.79987793480082,
+        #                 34.628866083309546])
+        # v_seed = []
+        # for seed_ in range(1,100):
+        #     np.random.seed(seed_)
+        #     v_per = np.random.normal(mu, sigma, predictions_ahead)
+        #     v_seed.append(v_per)
+        # v = np.mean(v_seed, axis=0)
         mean_of_last_7days = np.mean(all_data['weekly_actual_sum'].iloc[-(predictions_ahead + 1):])
         v2 = [mean_of_last_7days] * predictions_ahead
         v_predictions = predictions + v
@@ -195,12 +229,11 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
             v2 = np.random.binomial(n, p, predictions_ahead)
             idx_binom = np.where(v2 > 0)
             if len(idx_binom) > 0:
-                for idx in idx_binom:
+                for idx in list(idx_binom[0]):
                     try:
                         if v_predictions[idx] == 0:
                             v_predictions[idx] = 1
                     except Exception as e:
-
                         print('Raised exception')
                         print(v_predictions)
         all_predictions = pd.DataFrame({'predictions_7': [sum(v_predictions / 7)],
@@ -228,26 +261,10 @@ def get_X_y(df_weekly_data):
         X_ = pd.DataFrame()
     return X_, y_
 
-
-# def split_train_test(dataframe, last_train_date, last_test_date, prediction_days=7):
-#     """
-#
-#     :param dataframe:
-#     :param days_before:
-#     :return:
-#     """
-#     if dataframe.shape[0] - prediction_days < 0:
-#         df_train = pd.DataFrame()
-#         df_test = pd.DataFrame()
-#     else:
-#         df_train = dataframe[dataframe['date'] <= last_train_date]
-#         df_test = dataframe[(dataframe['date'] > last_train_date) & (dataframe['date'] <= last_test_date)]
-#     return df_train, df_test
-
 def process_features(daily_data, last_train_date, future_days=7):
     """
     Function that creates the fature set
-    :param daily_data: The daily data
+    :param daily_data_cp: The daily data
     :param last_train_date: Last train days
     :param future_days: The forecast horizon
     :return: The feature set
@@ -255,64 +272,110 @@ def process_features(daily_data, last_train_date, future_days=7):
     # TODO: Remove this part it's only useful where you load the data from the feeather files
     if 'index' in daily_data.columns:
         daily_data = daily_data.drop('index', axis=1)
-    daily_data = daily_data.sort_values(by='date')
-    daily_data = daily_data.reset_index(drop=True)
+    daily_data_cp = daily_data.copy()
+    daily_data_cp = daily_data_cp.sort_values(by='date')
+    daily_data_cp = daily_data_cp.reset_index(drop=True)
     # I do not get why he is doing this but let's see
     last_train_date_plus_7 = pd.to_datetime(last_train_date) + timedelta(days=7)
     try:
-        idx_last_date_plus_7 = daily_data.index[daily_data['date'] == last_train_date_plus_7].tolist()[0] +1
+        idx_last_date_plus_7 = daily_data_cp.index[daily_data_cp['date'] == last_train_date_plus_7].tolist()[0] + 1
     except Exception as e:
-        idx_last_date_plus_7 = daily_data.index[daily_data['date'] <= last_train_date_plus_7].tolist()[-1] + 1
-    daily_data = daily_data.iloc[0:idx_last_date_plus_7]
-    daily_data = daily_data.iloc[:-7]
+        idx_last_date_plus_7 = daily_data_cp.index[daily_data_cp['date'] <= last_train_date_plus_7].tolist()[-1] + 1
+    daily_data_cp = daily_data_cp.iloc[0:idx_last_date_plus_7]
+    # Product ids with one single line of data
+    if daily_data.shape[0]==1:
+        daily_data_cp = daily_data_cp.iloc[:]
+    else:
+        daily_data_cp = daily_data_cp.iloc[:-7]
     try:
-        assert (daily_data.date.max()<=pd.to_datetime(last_train_date))
+        assert (daily_data_cp.date.max() <= pd.to_datetime(last_train_date))
     except AssertionError:
         logging.error('Assertion failed')
     #daily_data = daily_data[daily_data['date'] <= last_train_date]
     # Correct for negative values
-    daily_data['lowest_tier_one'] = np.where(daily_data['lowest_tier_one'] < 0, 0, daily_data['lowest_tier_one'])
-    daily_data['lowest_tier_one'] = daily_data['lowest_tier_one'].fillna(0)
-    daily_data['price'] = daily_data['price'].fillna(0)
-    if sum(daily_data.actual_intermediate) > 0:
+    daily_data_cp['lowest_tier_one'] = np.where(daily_data_cp['lowest_tier_one'] < 0, 0, daily_data_cp['lowest_tier_one'])
+    daily_data_cp['lowest_tier_one'] = daily_data_cp['lowest_tier_one'].fillna(0)
+    daily_data_cp['price'] = daily_data_cp['price'].fillna(0)
+    daily_data_cp = daily_data_cp.sort_values(by='date')
+    if sum(daily_data_cp.actual_intermediate) > 0:
         # Find the first non-zero index in the actuals TODO:Can you find a better way here?
-        actual_intermediate_array = np.array(daily_data.actual_intermediate)
-        daily_data['actual'] = daily_data.actual_intermediate
+        actual_intermediate_array = np.array(daily_data_cp.actual_intermediate)
+        daily_data_cp['actual'] = daily_data_cp.actual_intermediate
         non_zero_idx = np.nonzero(actual_intermediate_array)[0][0] - 8
         initial_val = np.max([non_zero_idx, 8])
         # Create weekly target
-        daily_data['weekly_actual_sum'] = daily_data['actual'].rolling(window=7).sum().fillna(0)
-        daily_data['weekly_actual_sum'] = pd.to_numeric(daily_data['weekly_actual_sum'], downcast="integer")
-        # TODO: Remove production target
-        daily_data['weekly_actual_sum_production'] = daily_data['actual'].rolling(window=7).sum().shift(-6).reset_index(
-            0, drop=True)
+        daily_data_cp['weekly_actual_sum'] = daily_data_cp['actual'].rolling(window=7).sum().fillna(0)
+        daily_data_cp['weekly_actual_sum'] = pd.to_numeric(daily_data_cp['weekly_actual_sum'], downcast="integer")
         # Create weekly pricing features
-        daily_data['weekly_price_avg'] = daily_data['price'].rolling(window=7).mean()
-        daily_data['weekly_lowest_tier_one_avg'] = daily_data['lowest_tier_one'].rolling(window=7).mean()
+        daily_data_cp['weekly_price_avg'] = daily_data_cp['price'].rolling(window=7).mean()
+        daily_data_cp['weekly_lowest_tier_one_avg'] = daily_data_cp['lowest_tier_one'].rolling(window=7).mean()
         for lag in range(1, NUMBER_LAGS + 1):
             feature = 'lag_{}'.format(lag)
-            daily_data[feature] = daily_data['weekly_actual_sum'].shift(lag)
+            daily_data_cp[feature] = daily_data_cp['weekly_actual_sum'].shift(lag)
             # Fill the NaN with zero
-            daily_data[feature].fillna(0, inplace=True)
-        daily_data['step_last_21'] = 0
-        daily_data['step_last_15'] = 0
-        if daily_data.shape[0] >= 21:
-            daily_data.step_last_21.iloc[-21:] = 1
-            daily_data.step_last_15.iloc[-15:] = 1
-        elif daily_data.shape[0] >= 15:
-            daily_data.step_last_21.iloc[-1:] = 1
-            daily_data.step_last_15.iloc[-15:] = 1
+            daily_data_cp[feature].fillna(0, inplace=True)
+        daily_data_cp['step_last_21'] = 0
+        daily_data_cp['step_last_15'] = 0
+        if daily_data_cp.shape[0] >= 21:
+            daily_data_cp.step_last_21.iloc[-21:] = 1
+            daily_data_cp.step_last_15.iloc[-15:] = 1
+        elif daily_data_cp.shape[0] >= 15:
+            daily_data_cp.step_last_21.iloc[-1:] = 1
+            daily_data_cp.step_last_15.iloc[-15:] = 1
         else:
-            daily_data.step_last_21.iloc[-1:] = 1
-            daily_data.step_last_15.iloc[-2:] = 1
+            daily_data_cp.step_last_21.iloc[-1:] = 1
+            daily_data_cp.step_last_15.iloc[-2:] = 1
         # Get the data after the first non-zero sale
-        daily_data = daily_data.iloc[initial_val - 1:, :]
-        daily_data['prod_age'] = np.log(range(1, daily_data.shape[0] + 1))
+        daily_data_cp = daily_data_cp.iloc[initial_val - 1:, :]
+        daily_data_cp['prod_age'] = np.log(range(1, daily_data_cp.shape[0] + 1))
         keep_columns = ['date', 'weekly_actual_sum', 'weekly_price_avg', 'weekly_lowest_tier_one_avg',
                         'lag_1', 'lag_2', 'lag_3', 'lag_4',
                         'lag_5', 'lag_6', 'lag_7', 'step_last_21', 'step_last_15', 'prod_age']
-        daily_data = daily_data[keep_columns]
-        return daily_data
+        daily_data_cp = daily_data_cp[keep_columns]
+        return daily_data_cp
     else:
         logging.warning('Feature engineering will return an empty dataframe')
         return pd.DataFrame()
+
+def predictions_per_key(product_id, df_subsidiary, last_train_date):
+    """
+    Function that calculates the predictions per key
+    :param product_id:
+    :param df_subsidiary:
+    :param last_train_date:
+    :return:
+    """
+
+    daily_data = df_subsidiary[(df_subsidiary['product_id'] == product_id)]
+    daily_data = daily_data.sort_values('date')
+    results = {}
+    if daily_data.date.min() > pd.to_datetime(last_train_date) or daily_data.shape[0]==0:
+        # Some product ids exists after the training date
+        print('Skipping because date bigger than train date or empty dataframe')
+        y_ = 0
+        X_ = pd.DataFrame()
+        df_pricing_actuals_pid_weekly = pd.DataFrame()
+    else:
+        df_pricing_actuals_pid_weekly = process_features( daily_data, last_train_date, future_days=7)
+        # all_pids.append(product_id)
+        # print(df_pid_daily.product_id.unique())
+        X_, y_ = get_X_y(df_pricing_actuals_pid_weekly)
+    cv_ = estimate_model(X_, y_)
+    all_data, predictions = get_predictions(cv_, X_, df_pricing_actuals_pid_weekly, 7,
+                                               last_train_date=last_train_date)
+    # results['product_id'] = product_id
+    results[product_id] = {}
+    if predictions.empty:
+        # print(product_id)
+        results[product_id]['prediction_date'] = pd.to_datetime(last_train_date) + timedelta(days=1)
+        results[product_id]['predictions'] = -100
+    else:
+        results[product_id]['prediction_date'] = predictions.date[0]
+        if predictions.predictions_7[0] < 1:
+            predictions = np.ceil(predictions.predictions_7[0])
+            results[product_id]['predictions'] = predictions
+        else:
+            results[product_id]['predictions'] = predictions.predictions_7[0]
+    del cv_, all_data, predictions, X_, df_pricing_actuals_pid_weekly
+    gc.collect()
+    return pd.DataFrame(results).T

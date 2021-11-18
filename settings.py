@@ -23,7 +23,7 @@ ELASTIC_NET_SETTINGS_OTHER = {  # 'l1_ratio': [1, 0, 1, 5, 10, 10, 10, 10, 10, 1
 }
 GLMNET_NET_SETTINGS_30 = {'penalties': np.array([1, 0, 1, 5, 10, 10, 10, 10, 10, 10, 2, 2]).astype(float),
                           'lower_limit': np.array(
-                              [-np.inf, -np.inf, -0, -0.9, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -np.inf,
+                              [-np.inf, -np.inf, 0, -0.9, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -np.inf,
                                -np.inf]).astype(float),
                           'upper_limit': np.array(
                               [0, np.inf, np.inf, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, np.inf, np.inf]).astype(float)
