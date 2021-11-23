@@ -85,6 +85,13 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
     :param predictions_ahead: Forecast horizon
     :param last_train_date: The last dat of training
     :return:
+    Notes: In this approach, we correct the predictions in 3 different stages
+    Correction 1: Correction using the residuals of the last 7 days
+                Reasoning behind: Correct for bias in the residuals
+    Correction 2: Correction using the residuals of the last 21 days
+                Reasoning behind: Re-Correct the predictions
+    Correction 3: Corrections using the mean of the last 7 days actuals
+             Reasoning behind: Provides stability to the forecast and we avoid sudden changes
     """
     if cv_model:
         # fitting = cv_model.predict(train_data)
@@ -109,9 +116,16 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
         # Sum of residuals
         sum_x_hat = np.sum(x_hat)
         mean_last_observations = np.mean(all_data['weekly_actual_sum'].iloc[iniLastObs - 1:])
+        # Correction 1
+        # If you are residuals are <0 => you are over forecasting
+        # If the mean of the last observations < 50 => Small time series
+        # The parameters multiplier and stdcomponent will be used to create normal distribution. The idea behind it is that
+        # if we have signs of over estimation in the resiudals than we should correct it
+        # The w1, w2 parameters are used to weight the predictions from the glmnet and the lag used
         if (sum_x_hat < 0) & (mean_last_observations < 50):
+            # TODO: Fix this/Also exists in Andres approach
             if sum_x_hat == 0:
-                multiplier = 0
+                multiplier = 4
                 stdcomponent = np.std(x_hat) / 4
                 w1 = 0.9
                 w2 = 0.1
@@ -121,10 +135,12 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
                 w1 = 0.8
                 w2 = 0.2
         else:
+            # This is the case where the residuals do not show a a sign of bias so no need to correct for it
             multiplier = 0
             stdcomponent = 0
             w1 = 0.5
             w2 = 0.5
+        # Add the random component/Volatility on sales
         mu, sigma = multiplier * np.mean(x_hat), stdcomponent
         v = np.random.normal(mu, sigma, predictions_ahead)
         # Get the last training values
@@ -180,6 +196,7 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
             df_prediction['lag_5'] = df_prediction_cp['lag_4']
             df_prediction['lag_6'] = df_prediction_cp['lag_5']
             df_prediction['lag_7'] = df_prediction_cp['lag_6']
+        # Correction 2
         iniLastObs = np.max([np.min([find_lastSale, all_data.shape[0] - 21]), 1])
         x_hat = all_data['x_hat'].iloc[iniLastObs - 1:]
         mu, sigma = np.mean(x_hat), np.std(x_hat)
@@ -224,6 +241,7 @@ def get_predictions(cv_model, train_data, all_data, predictions_ahead, last_trai
         last_21d = all_data.iloc[iniLastObs - 1:]
         zero_values_last21 = last_21d[last_21d['weekly_actual_sum'] == 0]
         non_zero_values_last21 = last_21d[last_21d['weekly_actual_sum'] > 0]
+        # This is used to correct for low sellers
         if (zero_values_last21.shape[0] / last_21d.shape[0]) > 0.9:
             n, p = 1, non_zero_values_last21.shape[0] / np.min([train_data.shape[0] - iniLastObs, 7 * 12])
             v2 = np.random.binomial(n, p, predictions_ahead)
